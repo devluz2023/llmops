@@ -1,0 +1,136 @@
+services:
+  app:
+    build: .
+    container_name: ultimate_voice_omnichannel_app
+    ports:
+      - "127.0.0.1:8050:8050"
+    environment:
+      OLLAMA_HOST_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:3b}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
+      POSTGRES_URL: postgresql+psycopg://postgres:postgres@postgres:5432/enterprise_db
+      PHOENIX_COLLECTOR_ENDPOINT: http://phoenix:6006/v1/traces
+      PHOENIX_API_KEY: ${PHOENIX_API_KEY:-}
+      OTEL_SERVICE_NAME: llmops-assistant
+      MATRIX_HOMESERVER_URL: http://synapse:8008
+      MATRIX_USER_ID: ${MATRIX_USER_ID:-}
+      MATRIX_ACCESS_TOKEN: ${MATRIX_ACCESS_TOKEN:-}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_API_KEY_SID: ${TWILIO_API_KEY_SID:-}
+      TWILIO_API_KEY_SECRET: ${TWILIO_API_KEY_SECRET:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_WHATSAPP_FROM: ${TWILIO_WHATSAPP_FROM:-}
+      TWILIO_WEBHOOK_URL: ${TWILIO_WEBHOOK_URL:-}
+    depends_on:
+      ollama-models:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      synapse:
+        condition: service_healthy
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: llmops_ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  ollama-models:
+    image: ollama/ollama:latest
+    container_name: llmops_ollama_models
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        until OLLAMA_HOST=http://ollama:11434 ollama list >/dev/null 2>&1; do
+          sleep 2
+        done
+        OLLAMA_HOST=http://ollama:11434 ollama pull "$$OLLAMA_MODEL"
+        OLLAMA_HOST=http://ollama:11434 ollama pull "$$EMBEDDING_MODEL"
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:3b}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
+    volumes:
+      - ollama_data:/root/.ollama
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"
+
+  ui:
+    build: .
+    container_name: llmops_streamlit_ui
+    command:
+      - streamlit
+      - run
+      - ui.py
+      - --server.address=0.0.0.0
+      - --server.port=8501
+      - --server.headless=true
+    ports:
+      - "127.0.0.1:8501:8501"
+    environment:
+      API_URL: http://app:8050
+    depends_on:
+      app:
+        condition: service_started
+    restart: unless-stopped
+
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    container_name: phoenix_observer
+    ports:
+      - "127.0.0.1:6007:6006"
+    restart: unless-stopped
+
+  synapse:
+    image: matrixdotorg/synapse:latest
+    container_name: matrix_synapse
+    ports:
+      - "127.0.0.1:8008:8008"
+    entrypoint: ["/bin/sh", "/bootstrap.sh"]
+    volumes:
+      - matrix_data:/data
+      - ./matrix/bootstrap.sh:/bootstrap.sh:ro
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8008/_matrix/client/versions')"
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: postgres_vector_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: enterprise_db
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d enterprise_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  matrix_data:
+  ollama_data:
+  postgres_data:
